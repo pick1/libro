@@ -1,0 +1,8 @@
+streamlit>=1.35
+requests
+newspaper3k
+lxml[html_clean]
+chromadb
+pysqlite3-binary
+sentence-transformers
+python-dotenv

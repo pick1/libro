@@ -1,0 +1,27 @@
+[Unit]
+Description=Libro — Book discovery and want-to-read tracker (Streamlit)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/dp/projects/libro
+Environment="PATH=/home/dp/projects/libro/venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/home/dp/projects/libro/venv/bin/streamlit run app.py --server.address=0.0.0.0 --server.port=5252 --server.headless=true
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Environment variables (copy from .env file or set here)
+# OPENCODE_API_KEY=
+# XAVIER_BASE_URL=http://192.168.1.110:8080/v1
+# XAVIER_API_KEY=
+# XAVIER_MODEL=gpt-oss-20b
+# LOCAL_BASE_URL=http://localhost:11434/v1
+# LOCAL_MODEL=gpt-oss-20b
+# CHROMA_PERSIST_DIR=/home/dp/projects/ai_librarian/vectorstore
+# EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+
+[Install]
+WantedBy=default.target

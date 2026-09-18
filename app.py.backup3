@@ -1,0 +1,326 @@
+import sys
+import hashlib
+import streamlit as st
+from libro.extractor import detect_source_type, fetch_url, clean_text
+from libro.analyzer import extract_book, set_notification_callback
+from libro.librarian import LibrarianIndex
+from libro.store import WantToReadStore
+
+# Initialize stores and indices
+@st.cache_resource
+def get_store():
+    return WantToReadStore()
+
+@st.cache_resource
+def get_librarian():
+    return LibrarianIndex()
+
+store = get_store()
+librarian = get_librarian()
+
+# Set up notification callback for analyzer
+def notify_callback(msg: str, icon: str = "ℹ️"):
+    st.toast(msg, icon=icon)
+
+set_notification_callback(notify_callback)
+
+# Page config
+st.set_page_config(
+    page_title="Libro",
+    page_icon="📚",
+    layout="centered",
+    initial_sidebar_state="expanded",
+)
+
+# Custom CSS to match Signal's dark theme
+st.markdown(
+    """
+    <style>
+    /* Main background */
+    .stApp {
+        background-color: #111118;
+        color: #FFFFFF;
+    }
+    /* Sidebar styling */
+    [data-testid="stSidebar"] {
+        background-color: #111118;
+        border-right: 1px solid #2A2A35;
+    }
+    [data-testid="stSidebar"] .stButton>button {
+        background-color: #00ff88;
+        color: #111118;
+        border: none;
+        padding: 0.5rem 1rem;
+        border-radius: 4px;
+        font-weight: bold;
+    }
+    [data-testid="stSidebar"] .stButton>button:hover {
+        background-color: #00cc6a;
+    }
+    /* Text area */
+    [data-testid="stTextArea"] textarea {
+        background-color: #1E1E28;
+        color: #FFFFFF;
+        border: 1px solid #2A2A35;
+        border-radius: 4px;
+    }
+    /* Selectbox */
+    [data-testid="stSelectbox"] div[data-baseweb="select"] > div {
+        background-color: #1E1E28;
+        color: #FFFFFF;
+        border: 1px solid #2A2A35;
+        border-radius: 4px;
+    }
+    /* Buttons in main area */
+    .stButton>button {
+        background-color: #2A2A35;
+        color: #FFFFFF;
+        border: 1px solid #3A3A45;
+        border-radius: 4px;
+    }
+    .stButton>button:hover {
+        background-color: #3A3A45;
+        border-color: #4A4A55;
+    }
+    /* Cards for book entries */
+    .book-card {
+        background-color: #1E1E28;
+        border-left: 4px solid #00ff88;
+        padding: 1rem;
+        margin-bottom: 1rem;
+        border-radius: 0 4px 4px 0;
+    }
+    .book-card.not-available {
+        border-left-color: #4488ff;
+    }
+    .book-card h4 {
+        color: #00ff88;
+        margin: 0 0 0.5rem 0;
+        font-family: 'Syne', sans-serif;
+    }
+    .book-card p {
+        color: #FFFFFF;
+        margin: 0.25rem 0;
+    }
+    .book-card .author {
+        font-style: italic;
+        color: #CCCCCC;
+    }
+    .book-card .genre-tags {
+        margin: 0.5rem 0;
+    }
+    .book-card .genre-tag {
+        display: inline-block;
+        background-color: #2A2A35;
+        color: #FFFFFF;
+        padding: 0.25rem 0.5rem;
+        border-radius: 4px;
+        font-size: 0.875rem;
+        margin-right: 0.5rem;
+    }
+    .book-card .summary {
+        font-size: 0.9rem;
+        color: #DDDDDD;
+    }
+    .book-card .verdict {
+        font-style: italic;
+        color: #00ff88;
+        margin-top: 0.5rem;
+    }
+    .book-card .confidence-bar {
+        height: 4px;
+        background-color: #2A2A35;
+        border-radius: 2px;
+        overflow: hidden;
+        margin: 0.5rem 0;
+    }
+    .book-card .confidence-fill {
+        height: 100%;
+        background-color: #00ff88;
+    }
+    .book-card .availability-badge {
+        display: inline-block;
+        background-color: #00ff88;
+        color: #111118;
+        padding: 0.25rem 0.5rem;
+        border-radius: 4px;
+        font-size: 0.875rem;
+        margin-right: 0.5rem;
+    }
+    .book-card .availability-badge.not-available {
+        background-color: #4488ff;
+        color: #FFFFFF;
+    }
+    .book-card .delete-button { background-color: #e53935; }
+        background-color: #ff4466;
+        color: #FFFFFF;
+        border: none;
+        padding: 0.25rem 0.5rem;
+        border-radius: 4px;
+        cursor: pointer;
+    }
+    .book-card .delete-button:hover { background-color: #c62828; }
+        background-color: #ff2244;
+    }
+    /* Stats text */
+    .stats {
+        font-size: 0.875rem;
+        color: #AAAAAA;
+        margin-top: 1rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Sidebar
+with st.sidebar:
+    st.markdown("<h1 style='text-align: center; color: #00ff88; font-family: Syne;'>Libro</h1>", unsafe_allow_html=True)
+    
+    # Provider selector
+    provider_options = ["OpenCode (primary)", "Xavier LAN (fallback)", "Ollama (local)"]
+    provider = st.selectbox("Provider", provider_options, index=0)
+    
+    # Map selector to provider key used in analyzer
+    provider_map = {
+        "OpenCode (primary)": "opencode",
+        "Xavier LAN (fallback)": "xavier",
+        "Ollama (local)": "ollama",
+    }
+    provider_key = provider_map[provider]
+    
+    # Input area
+    st.markdown("### Paste a URL or book mention...")
+    user_input = st.text_area(
+        label="Input",
+        placeholder="e.g., https://example.com/book-review or 'I just finished reading Project Hail Mary by Andy Weir...'",
+        height=100,
+        label_visibility="collapsed",
+    )
+    
+    # SCAN button
+    if st.button("SCAN", type="primary", use_container_width=True):
+        if user_input.strip():
+            with st.spinner("Scanning..."):
+                try:
+                    # Detect source type
+                    source_type = detect_source_type(user_input)
+                    
+                    # Fetch content if URL
+                    if source_type == "url":
+                        raw_content = fetch_url(user_input)
+                    else:
+                        raw_content = user_input
+                    
+                    # Clean text
+                    cleaned_content = clean_text(raw_content)
+                    
+                    # Extract book metadata (returns a list of books)
+                    book_list = extract_book(cleaned_content, source_type)
+                    
+                    # Process each book
+                    any_added = False
+                    for book_data in book_list:
+                        book_data["source_type"] = source_type
+            book_data["source_type"] = source_type
+            # Track source URL for URLs
+            if source_type == "url":
+                book_data["source_url"] = user_input
+            else:
+                book_data["source_url"] = ""
+        # Check availability via librarian
+                        available, matched_title = librarian.check_availability(
+                            book_data["title"], book_data.get("author")
+                        )
+                        book_data["available_in_cloud_library"] = available
+                        book_data["cloud_library_match"] = matched_title
+                        
+                        # Add to store (deduplication handled inside)
+                        added = store.add(book_data)
+                        if added:
+                            any_added = True
+                    
+                    if any_added:
+                        st.success("Book(s) added to your want-to-read list!")
+                    else:
+                        st.info("All scanned books are already in your list (deduplicated).")
+                    
+                    # Rerun to update the feed
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
+        else:
+            st.warning("Please enter a URL or text to scan.")
+    
+    st.divider()
+    
+    # Search/filter by genre tag
+    st.markdown("### Search by genre tag")
+    search_tag = st.text_input(
+        label="Genre tag",
+        placeholder="e.g., sci-fi, fantasy",
+        label_visibility="collapsed",
+    )
+    
+    # Stats
+    all_books = store.all()
+    total_saved = len(all_books)
+    available_count = sum(1 for b in all_books if b["available_in_cloud_library"])
+    st.markdown(f"<div class='stats'>Total saved: {total_saved}<br>Available in Cloud Library: {available_count}</div>", unsafe_allow_html=True)
+
+# Main feed
+st.markdown("### Your Want-to-Read List")
+
+# Filter books by search tag if provided
+filtered_books = all_books
+if search_tag:
+    filtered_books = [
+        b for b in all_books
+        if any(search_tag.lower() in tag.lower() for tag in b["genre_tags"])
+    ]
+
+if not filtered_books:
+    st.info("No books match your filter. Try scanning a book URL or text to add to your list.")
+else:
+    # Display books in cards
+    for book in filtered_books:
+        # Determine card class based on availability
+        card_class = "book-card"
+        if not book["available_in_cloud_library"]:
+            card_class += " not-available"
+        
+        with st.container():
+            st.markdown(f'<div class="{card_class}">', unsafe_allow_html=True)
+            
+            col1, col2 = st.columns([1, 4])
+            with col1:
+                # Availability badge
+                if book["available_in_cloud_library"]:
+                    badge_text = f"Available in Cloud Library ✓"
+                    if book["cloud_library_match"]:
+                        badge_text += f" ({book['cloud_library_match']})"
+                    st.markdown(f"<span class='availability-badge'>{badge_text}</span>", unsafe_allow_html=True)
+                else:
+                    st.markdown("<span class='availability-badge not-available'>Not in Cloud Library</span>", unsafe_allow_html=True)
+            
+            with col2:
+                st.markdown(f"<h4>{book['title']}</h4>", unsafe_allow_html=True)
+                if book["author"]:
+                    st.markdown(f"<p class='author'>by {book['author']}</p>", unsafe_allow_html=True)
+                if book["genre_tags"]:
+                    tags_html = "".join([f"<span class='genre-tag'>{tag}</span>" for tag in book["genre_tags"]])
+                    st.markdown(f"<div class='genre-tags'>{tags_html}</div>", unsafe_allow_html=True)
+                st.markdown(f"<p class='summary'>{book['summary']}</p>", unsafe_allow_html=True)
+                st.markdown(f"<p class='verdict'>{book['verdict']}</p>", unsafe_allow_html=True)
+                # Confidence bar
+                confidence = book["confidence"]
+                st.markdown(f"<div class='confidence-bar'><div class='confidence-fill' style='width: {confidence*100}%;'></div></div>", unsafe_allow_html=True)
+                # Delete button
+                book_id = hashlib.md5(f"{book['title']}{book.get('author') or ''}".encode()).hexdigest()
+                if st.button("Delete", key=f"delete_{book_id}", help="Remove this book"):
+                    store.delete(book_id)
+                    st.success(f"Deleted {book['title']}")
+                    st.rerun()
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+            st.divider()
