@@ -1,54 +1,54 @@
-import sys
-import hashlib
+# Libro — Streamlit app for book discovery and want-to-read tracking.
+#
+# Logging: this app deliberately configures no file handler. libro.service sends
+# stdout/stderr to the systemd journal (StandardOutput/StandardError=journal), so
+# `journalctl -u libro -f` is the live log. A previous `logging.basicConfig`
+# writing to libro_events.log at DEBUG level also captured third-party chatter
+# from chromadb and sentence-transformers and grew past 3 GB with no rotation.
 import streamlit as st
-from libro.auth import is_password_set, verify_password, set_password
+
 from libro.extractor import detect_source_type, fetch_url, clean_text
 from libro.analyzer import extract_book, set_notification_callback
 from libro.librarian import LibrarianIndex
 from libro.store import WantToReadStore
+from libro.filters import book_id, book_tags, build_tag_index, filter_books, tag_slug
+
+
+# Filter state. `active_tags` is a list of tags currently narrowing the feed;
+# selecting more tags widens the result set (OR), and clicking a selected tag
+# again removes it. `search_query` is the free-text box in the sidebar.
+#
+# Both are mutated from widget callbacks rather than mid-script, which is what
+# Streamlit expects: callbacks run before the script re-executes, so every
+# widget on the page renders from one consistent snapshot of the state.
+if "active_tags" not in st.session_state:
+    st.session_state.active_tags = []
+
+
+def toggle_tag(tag: str) -> None:
+    """Add `tag` to the active set, or remove it if already active."""
+    active = [t for t in st.session_state.active_tags if t != tag]
+    if len(active) == len(st.session_state.active_tags):
+        active.append(tag)
+    # Rebind rather than mutate, so Streamlit sees the state as changed.
+    st.session_state.active_tags = active
+
+
+def clear_filters() -> None:
+    st.session_state.active_tags = []
+    st.session_state.search_query = ""
 
 # Initialize stores and indices
+@st.cache_resource
 def get_store():
     return WantToReadStore()
 
+@st.cache_resource
 def get_librarian():
     return LibrarianIndex()
 
 store = get_store()
 librarian = get_librarian()
-
-# ─── AUTH GATE ────────────────────────────────────────────────────────────────
-if not st.session_state.get("authenticated"):
-    st.markdown(
-        '<div class="signal-header" style="text-align:center;margin-top:40px">LIBRO</div>',
-        unsafe_allow_html=True,
-    )
-    if not is_password_set():
-        st.markdown('<div style="max-width:360px;margin:40px auto">', unsafe_allow_html=True)
-        st.markdown("**Set a password** to secure this dashboard.")
-        pw = st.text_input("Password", type="password", key="setup_pw")
-        pw2 = st.text_input("Confirm", type="password", key="setup_pw2")
-        if st.button("Set Password", type="primary", use_container_width=True):
-            if pw and pw == pw2 and len(pw) >= 4:
-                set_password(pw)
-                st.session_state["authenticated"] = True
-                st.rerun()
-            else:
-                st.error("Password must be 4+ chars and match.")
-        st.markdown("</div>", unsafe_allow_html=True)
-    else:
-        st.markdown('<div style="max-width:360px;margin:40px auto">', unsafe_allow_html=True)
-        pw = st.text_input("Password", type="password", key="login_pw")
-        if st.button("Unlock", type="primary", use_container_width=True):
-            if verify_password(pw):
-                st.session_state["authenticated"] = True
-                st.rerun()
-            else:
-                st.error("Incorrect password.")
-        st.markdown("</div>", unsafe_allow_html=True)
-    st.stop()
-
-
 
 # Set up notification callback for analyzer
 def notify_callback(msg: str, icon: str = "ℹ️"):
@@ -59,14 +59,10 @@ set_notification_callback(notify_callback)
 # Page config
 st.set_page_config(
     page_title="Libro",
-    page_icon="/home/dp/projects/libro/static/favicon.svg",
+    page_icon="📚",
     layout="centered",
     initial_sidebar_state="expanded",
 )
-
-# Initialize session state for genre filter
-if 'search_tag' not in st.session_state:
-    st.session_state.search_tag = ''
 
 # Custom CSS to match Signal's dark theme
 st.markdown(
@@ -145,14 +141,46 @@ st.markdown(
     .book-card .genre-tags {
         margin: 0.5rem 0;
     }
-    .book-card .genre-tag {
-        display: inline-block;
+    /* Tag pills. Streamlit adds an st-key-<key> class to any element given a
+       `key=`, so scoping to the card and sidebar tag rows keeps these styles
+       off the Delete button. Prefix match, because the per-book container keys
+       must be unique. */
+    [class*="st-key-card_tags"] [data-testid="stBaseButton-secondary"],
+    [class*="st-key-sidebar_tags"] [data-testid="stBaseButton-secondary"],
+    [class*="st-key-active_tags"] [data-testid="stBaseButton-secondary"] {
+        background-color: #1E1E28;
+        color: #B8B8D0;
+        border: 1px solid #3A3A45;
+        border-radius: 999px;
+        padding: 0.15rem 0.65rem;
+        min-height: 0;
+        font-size: 0.75rem;
+        font-weight: 500;
+        line-height: 1.6;
+    }
+    .st-key-card_tags [data-testid="stBaseButton-secondary"]:hover,
+    .st-key-sidebar_tags [data-testid="stBaseButton-secondary"]:hover {
         background-color: #2A2A35;
         color: #FFFFFF;
-        padding: 0.25rem 0.5rem;
-        border-radius: 4px;
-        font-size: 0.875rem;
-        margin-right: 0.5rem;
+        border-color: #00ff88;
+    }
+    /* Selected tag — rendered via type="primary" when the tag is active. */
+    [class*="st-key-card_tags"] [data-testid="stBaseButton-primary"],
+    [class*="st-key-sidebar_tags"] [data-testid="stBaseButton-primary"],
+    [class*="st-key-active_tags"] [data-testid="stBaseButton-primary"] {
+        background-color: #00ff88;
+        color: #111118;
+        border: 1px solid #00ff88;
+        border-radius: 999px;
+        padding: 0.15rem 0.65rem;
+        min-height: 0;
+        font-size: 0.75rem;
+        font-weight: 700;
+        line-height: 1.6;
+    }
+    [class*="st-key-card_tags"] button:focus,
+    [class*="st-key-sidebar_tags"] button:focus {
+        outline-color: #00ff88;
     }
     .book-card .summary {
         font-size: 0.9rem;
@@ -188,7 +216,7 @@ st.markdown(
         color: #FFFFFF;
     }
     .book-card .delete-button {
-        background-color: #e53935;
+        background-color: #ff4466;
         color: #FFFFFF;
         border: none;
         padding: 0.25rem 0.5rem;
@@ -196,7 +224,7 @@ st.markdown(
         cursor: pointer;
     }
     .book-card .delete-button:hover {
-        background-color: #c62828;
+        background-color: #ff2244;
     }
     /* Stats text */
     .stats {
@@ -208,6 +236,12 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+# Load the library up front so the sidebar can offer a browsable list of every
+# tag in the collection, not just the tags of whatever is currently visible.
+all_books = store.all()
+tag_index = build_tag_index(all_books)
+active_tags = list(st.session_state.active_tags)
 
 # Sidebar
 with st.sidebar:
@@ -251,7 +285,7 @@ with st.sidebar:
                     # Clean text
                     cleaned_content = clean_text(raw_content)
                     
-                    # Extract book metadata (returns a list of books)
+                    # Extract book metadata (returns a list)
                     book_list = extract_book(cleaned_content, source_type)
                     
                     # Process each book
@@ -260,9 +294,7 @@ with st.sidebar:
                         book_data["source_type"] = source_type
                         book_data.setdefault("book_type", "")
                         book_data.setdefault("source_url", "")
-                        # Ensure genre_tags is a list of strings
                         if isinstance(book_data.get("genre_tags"), str):
-                            # Split by commas or whitespace
                             raw = book_data["genre_tags"]
                             if "," in raw:
                                 book_data["genre_tags"] = [t.strip() for t in raw.split(",") if t.strip()]
@@ -270,11 +302,9 @@ with st.sidebar:
                                 book_data["genre_tags"] = [t.strip() for t in raw.split() if t.strip()]
                         elif not isinstance(book_data.get("genre_tags"), list):
                             book_data["genre_tags"] = []
-                        # Track source URL for URLs
+                        
                         if source_type == "url":
                             book_data["source_url"] = user_input
-                        else:
-                            book_data["source_url"] = ""
                         
                         # Check availability via librarian
                         available, matched_title = librarian.check_availability(
@@ -283,7 +313,7 @@ with st.sidebar:
                         book_data["available_in_cloud_library"] = available
                         book_data["cloud_library_match"] = matched_title
                         
-                        # Add to store (deduplication handled inside)
+                        # Add to store
                         added = store.add(book_data)
                         if added:
                             any_added = True
@@ -291,124 +321,194 @@ with st.sidebar:
                     if any_added:
                         st.success("Book(s) added to your want-to-read list!")
                     else:
-                        st.info("All scanned books are already in your list (deduplicated).")
+                        st.info("All scanned books are already in your list.")
                     
-                    # Rerun to update the feed
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Error: {str(e)}")
+                    import traceback
+                    error_type = type(e).__name__
+                    st.error(f"**Scan failed:** {error_type}")
+                    with st.expander("Error details"):
+                        st.code(traceback.format_exc(), language="python")
+                    with st.expander("Troubleshooting"):
+                        st.markdown("""
+                        **Try:**
+                        - Check if URL is accessible
+                        - Verify all API providers are configured
+                        - Try a different book URL or text
+                        - Check console logs for details
+                        """)
         else:
             st.warning("Please enter a URL or text to scan.")
     
     st.divider()
     
-    # Search/filter by genre tag
-    st.markdown("### Search by genre tag")
-    search_tag = st.text_input(
-        label="Genre tag",
-        placeholder="e.g., sci-fi, fantasy",
-        value=st.session_state.search_tag,
+    # Search / filter
+    st.markdown("### Search")
+
+    # Widgets write straight into session state under their own key; the return
+    # value below is read back once, after the sidebar has rendered, so there is
+    # no write-back-and-rerun dance to get out of sync.
+    st.text_input(
+        label="Search",
+        placeholder="Search titles and summaries...",
+        key="search_query",
         label_visibility="collapsed",
     )
-    if search_tag != st.session_state.search_tag:
-        st.session_state.search_tag = search_tag
+
+    # Chips for whatever is currently narrowing the feed. Clicking one unselects
+    # it; "Clear" drops every tag at once.
+    with st.container(key="active_tags"):
+        if active_tags:
+            st.markdown(
+                f"<p class='stats'>Filtering by {len(active_tags)} "
+                f"tag{'s' if len(active_tags) > 1 else ''}</p>",
+                unsafe_allow_html=True,
+            )
+            chip_cols = st.columns(len(active_tags))
+            for col, tag in zip(chip_cols, active_tags):
+                col.button(
+                    f"✕ {tag}",
+                    key=f"active__{tag_slug(tag)}",
+                    type="primary",
+                    on_click=toggle_tag,
+                    args=(tag,),
+                    width="stretch",
+                    help=f"Remove the {tag} filter",
+                )
+            st.button(
+                "Clear filters",
+                key="clear_filters",
+                on_click=clear_filters,
+                width="stretch",
+            )
+
+    # Every tag in the library, most common first. Clicking one selects it.
+    if tag_index:
+        with st.expander(f"All tags ({len(tag_index)})"):
+            with st.container(key="sidebar_tags"):
+                for tag, count in tag_index:
+                    is_active = tag in active_tags
+                    st.button(
+                        f"{tag} · {count}",
+                        key=f"sidebar__{tag_slug(tag)}",
+                        type="primary" if is_active else "secondary",
+                        on_click=toggle_tag,
+                        args=(tag,),
+                        width="stretch",
+                        help=(
+                            f"Remove the {tag} filter"
+                            if is_active
+                            else f"Show the {count} book"
+                            f"{'s' if count != 1 else ''} tagged {tag}"
+                        ),
+                    )
+
     # Stats
-    all_books = store.all()
-    total_saved = len(all_books)
-    available_count = sum(1 for b in all_books if b["available_in_cloud_library"])
-    st.markdown(f"<div class='stats'>Total saved: {total_saved}<br>Available in Cloud Library: {available_count}</div>", unsafe_allow_html=True)
 
 # Main feed
 st.markdown("### Your Want-to-Read List")
 
-filtered_books = all_books
-if search_tag:
-    filtered_books = [
-        b for b in all_books
-        if any(search_tag.lower() in tag.lower() for tag in (b.get("genre_tags") or []))
-    ]
+search_query = st.session_state.get("search_query", "")
+filtered_books = filter_books(all_books, active_tags, search_query)
+
+# Say what the feed is doing, so the result count never looks arbitrary.
+filter_bits = []
+if active_tags:
+    filter_bits.append("tags: " + ", ".join(sorted(active_tags)))
+if search_query.strip():
+    filter_bits.append(f'search: "{search_query.strip()}"')
+if filter_bits:
+    summary = " · ".join(filter_bits)
+    st.markdown(f"<p class='stats'>{len(filtered_books)} of {len(all_books)} books · {summary}</p>", unsafe_allow_html=True)
+else:
+    st.markdown(f"<p class='stats'>{len(all_books)} books</p>", unsafe_allow_html=True)
 
 if not filtered_books:
-    st.info("No books match your filter. Try scanning a book URL or text to add to your list.")
+    if filter_bits:
+        st.info(
+            f"No books match {summary}. "
+            "Click an active tag above to remove it, or use Clear filters."
+        )
+    else:
+        st.info("No books match your filter. Try scanning a book URL or text to add to your list.")
 else:
+    # Display books in cards
     for book in filtered_books:
-        available = book.get("available_in_cloud_library", False)
-        status = book.get('reading_status', 'want_to_read')
-        status_colors = {'want_to_read': '#4488ff', 'already_read': '#ffaa00', 'loved_it': '#ff4488'}
-        border_color = '#00ff88' if available else status_colors.get(status, '#4488ff')
-        title = book.get("title", "Unknown")
-        author = book.get("author") or ""
-        summary = book.get("summary") or ""
-        verdict = book.get("verdict") or ""
-        genre_tags = book.get("genre_tags") or []
-        confidence = book.get("confidence") or 0.0
-        source_url = book.get("source_url") or ""
-        match = book.get("cloud_library_match") or ""
-
-        book_id = hashlib.md5(f"{title}{author}".encode()).hexdigest()
-        is_read = book.get("is_read", False)
-        is_loved = book.get("is_loved", False)
-
-        # Status glyphs for card corner
-        glyphs = []
-        if is_read:
-            glyphs.append('<span style="font-size:11px;color:#ffaa00;font-family:DM Mono,monospace;text-shadow:0 0 8px #ffaa00aa">[ read ]</span>')
-        if is_loved:
-            glyphs.append('<span style="font-size:11px;color:#ff4488;font-family:DM Mono,monospace;text-shadow:0 0 8px #ff4488aa">[ love ]</span>')
-        status_glyph = ' '.join(glyphs)
-
-        tag_html = "".join(
-            f'<span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:10px;'
-            f'letter-spacing:0.1em;text-transform:uppercase;border:1px solid #353550;'
-            f'color:#7070a0;margin-right:4px;margin-bottom:4px">{t}</span>'
-            for t in genre_tags
-        )
-        avail_html = (
-            f'<span style="color:#00ff88;font-size:11px">✓ Cloud Library{" — " + match if match else ""}</span>'
-            if available else
-            '<span style="color:#404060;font-size:11px">not in cloud library</span>'
-        )
-        conf_pct = int(confidence * 100)
-        source_html = (
-            f'<a href="{source_url}" target="_blank" style="color:#44aaff;font-size:11px;text-decoration:none">source →</a>'
-            if source_url else ""
-        )
-
-        st.markdown(f"""
-<div style="background:#111118;border:1px solid #252535;border-left:3px solid #4488ff;
-border-radius:12px;padding:18px 20px;margin-bottom:6px">
-  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
-    <div style="font-family:Syne,sans-serif;font-size:17px;font-weight:700">{title}</div>
-    <div>{status_glyph}</div>
-  </div>
-  <div style="font-size:12px;color:#9090b0;margin-bottom:8px">by {author}</div>
-  <div style="margin-bottom:8px">{avail_html}</div>
-  <div style="margin-bottom:8px">{tag_html}</div>
-  <div style="font-size:12px;color:#9090b0;line-height:1.6;margin-bottom:10px">{summary}</div>
-  <div style="font-style:italic;font-size:13px;color:#e8e8f0;margin-bottom:10px">{verdict}</div>
-  <div style="display:flex;justify-content:space-between;align-items:center;border-top:1px solid #252535;padding-top:8px">
-    <span>{source_html}</span>
-    <span style="font-size:11px;color:#404060">confidence {conf_pct}%
-      <span style="display:inline-block;width:60px;height:4px;background:#252535;border-radius:2px;vertical-align:middle;margin-left:6px">
-        <span style="display:block;width:{conf_pct}%;height:100%;background:#4488ff;border-radius:2px"></span>
-      </span>
-    </span>
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
-        col_read, col_love, col_drop = st.columns([3, 3, 1])
-        with col_read:
-            read_label = "[ read ]" if is_read else "read"
-            if st.button(read_label, key=f"read_{book_id}"):
-                store.toggle_read(book_id, is_read)
-                st.rerun()
-        with col_love:
-            love_label = "[ love ]" if is_loved else "love"
-            if st.button(love_label, key=f"loved_{book_id}"):
-                store.toggle_loved(book_id, is_loved)
-                st.rerun()
-        with col_drop:
-            if st.button("drop", key=f"delete_{book_id}", help=f"Remove {title}"):
-                store.delete(book_id)
-                st.rerun()
+        # Determine card class based on availability
+        card_class = "book-card"
+        if not book["available_in_cloud_library"]:
+            card_class += " not-available"
+        
+        with st.container():
+            st.markdown(f'<div class="{card_class}">', unsafe_allow_html=True)
+            
+            col1, col2 = st.columns([1, 4])
+            with col1:
+                # Availability badge
+                if book["available_in_cloud_library"]:
+                    badge_text = f"Available in Cloud Library ✓"
+                    if book["cloud_library_match"]:
+                        badge_text += f" ({book['cloud_library_match']})"
+                    st.markdown(f"<span class='availability-badge'>{badge_text}</span>", unsafe_allow_html=True)
+                else:
+                    st.markdown("<span class='availability-badge not-available'>Not in Cloud Library</span>", unsafe_allow_html=True)
+            
+            with col2:
+                st.markdown(f"<h4>{book['title']}</h4>", unsafe_allow_html=True)
+                is_read = book.get("is_read", False)
+                is_loved = book.get("is_loved", False)
+                pills = [
+                    "<span style='color:#ffaa00;font-family:DM Mono,monospace;font-size:11px'>[ read ]</span>"
+                    if is_read else
+                    "<span style='color:#606080;font-family:DM Mono,monospace;font-size:11px'>[ unread ]</span>"
+                ]
+                if is_loved:
+                    pills.append("<span style='color:#ff4488;font-family:DM Mono,monospace;font-size:11px'>[ love ]</span>")
+                st.markdown(" ".join(pills), unsafe_allow_html=True)
+                if book["author"]:
+                    st.markdown(f"<p class='author'>by {book['author']}</p>", unsafe_allow_html=True)
+                tags = book_tags(book)
+                if tags:
+                    # Element keys must be unique across the whole page, so the
+                    # container key is per-book. It keeps the `st-key-card_tags`
+                    # prefix, which the CSS above matches on.
+                    with st.container(key=f"card_tags__{book_id(book)}"):
+                        tag_row = st.columns(len(tags))
+                        for col, tag in zip(tag_row, tags):
+                            is_active = tag in active_tags
+                            col.button(
+                                tag,
+                                key=f"card__{book_id(book)}__{tag_slug(tag)}",
+                                type="primary" if is_active else "secondary",
+                                on_click=toggle_tag,
+                                args=(tag,),
+                                width="stretch",
+                                help=(
+                                    f"Remove the {tag} filter"
+                                    if is_active
+                                    else f"Filter by {tag}"
+                                ),
+                            )
+                st.markdown(f"<p class='summary'>{book['summary']}</p>", unsafe_allow_html=True)
+                st.markdown(f"<p class='verdict'>{book['verdict']}</p>", unsafe_allow_html=True)
+                # Confidence bar
+                confidence = book["confidence"]
+                st.markdown(f"<div class='confidence-bar'><div class='confidence-fill' style='width: {confidence*100}%;'></div></div>", unsafe_allow_html=True)
+                bid = book_id(book)
+                c_read, c_love, c_del = st.columns([2, 2, 1])
+                with c_read:
+                    if st.button("[ read ]" if is_read else "mark read", key=f"read_{bid}"):
+                        store.toggle_read(bid, is_read)
+                        st.rerun()
+                with c_love:
+                    if st.button("[ love ]" if is_loved else "love", key=f"love_{bid}"):
+                        store.toggle_loved(bid, is_loved)
+                        st.rerun()
+                with c_del:
+                    if st.button("Delete", key=f"delete_{bid}", help="Remove this book"):
+                        store.delete(bid)
+                        st.rerun()
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+            st.divider()

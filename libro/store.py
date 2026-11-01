@@ -40,10 +40,10 @@ class WantToReadStore:
             "author": book.get("author") or "",
             "genre_tags": ",".join(book["genre_tags"]),  # store as comma-separated string
             "summary": book["summary"],
-            "source_type": book["source_type"],
+            "source_type": book.get("source_type", "url"),
             "confidence": float(book["confidence"]),
             "verdict": book["verdict"],
-            "available_in_cloud_library": bool(book["available_in_cloud_library"]),
+            "available_in_cloud_library": bool(book.get("available_in_cloud_library", False)),
             "cloud_library_match": book.get("cloud_library_match") or "",
             "book_type": book.get("book_type") or "",
             "source_url": book.get("source_url") or "",

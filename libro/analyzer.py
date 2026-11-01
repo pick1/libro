@@ -25,7 +25,6 @@ Each book object must have the following fields:
 - title: string, the title of the book
 - author: string, the author of the book (if known, otherwise empty string)
 - genre_tags: array of strings, relevant genre tags (e.g., ["sci-fi", "fantasy", "mystery"])
-- book_type: string, the type of book (e.g., "single book", "series", "trilogy", "omnibus", "box set", "collection")
 - summary: string, a brief summary of the book (1-2 sentences)
 - verdict: string, your overall verdict on the book (e.g., "Highly recommended", "Not worth reading")
 - confidence: float between 0.0 and 1.0 indicating your confidence in the extraction
@@ -36,9 +35,8 @@ Important rules:
 - Do not include any additional text or explanation outside the JSON array.
 - Extract ALL books mentioned in the text, one object per book.
 - For list articles (e.g., "Top 10 Cyberpunk Books"), extract each book listed, not the article itself as a book.
-- If a field is unknown, use a reasonable default (empty string for title/author/book_type, empty array for genre_tags, empty string for summary/verdict, 0.0 for confidence).
+- If a field is unknown, use a reasonable default (empty string for title/author, empty array for genre_tags, empty string for summary/verdict, 0.0 for confidence).
 - Genre tags should be lowercase and use hyphens for multi-word genres (e.g., "sci-fi", "historical-fiction").
-- Do not concatenate multiple tags into a single string; each tag must be a separate element in the array.
 - The summary should be concise and spoiler-free.
 - The verdict should be a short phrase expressing your opinion.
 """
@@ -158,6 +156,8 @@ def _parse_json_result(content: str) -> list[dict]:
     Parse the JSON result from the LLM, handling both array and object responses.
     Returns a list of book dictionaries.
     """
+    import sys
+    print(f"DEBUG _parse_json: input={repr(content[:300])}", file=sys.stderr)
     if not content or not content.strip():
         return []
     
