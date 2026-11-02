@@ -1,6 +1,7 @@
 """Password-based authentication for SIGNAL."""
 
 import hashlib
+import hmac
 import secrets
 from pathlib import Path
 
@@ -24,12 +25,13 @@ def is_password_set() -> bool:
 
 def verify_password(password: str) -> bool:
     """Check password against stored hash."""
-    if not is_password_set():
-        return True
-    stored = PASSWORD_FILE.read_text().strip()
-    salt, expected = stored.split(":", 1)
+    try:
+        stored = PASSWORD_FILE.read_text().strip()
+        salt, expected = stored.split(":", 1)
+    except (FileNotFoundError, ValueError):
+        return False  # fail closed: a missing or garbled hash file never unlocks
     _, actual = _hash_password(password, salt)
-    return actual == expected
+    return hmac.compare_digest(actual, expected)
 
 
 def set_password(password: str):

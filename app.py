@@ -9,10 +9,12 @@ import streamlit as st
 
 from libro.extractor import detect_source_type, fetch_url, clean_text
 from libro.analyzer import extract_book, set_notification_callback
+from libro.scanlog import log_scan, recent
+from libro.auth import is_password_set, verify_password, set_password
 from libro.librarian import LibrarianIndex
 from libro.store import WantToReadStore
 from libro.filters import book_id, book_tags, build_tag_index, filter_books, tag_slug
-
+from libro.instagram import is_instagram_url, fetch_instagram
 
 # Filter state. `active_tags` is a list of tags currently narrowing the feed;
 # selecting more tags widens the result set (OR), and clicking a selected tag
@@ -239,6 +241,40 @@ st.markdown(
 
 # Load the library up front so the sidebar can offer a browsable list of every
 # tag in the collection, not just the tags of whatever is currently visible.
+# ─── AUTH GATE ────────────────────────────────────────────────────────────
+# Runs before any library data or sidebar renders; st.stop() ends the run
+# for unauthenticated sessions.
+if not st.session_state.get("authenticated"):
+    st.markdown(
+        "<h1 style='text-align:center;color:#00ff88;font-family:Syne;margin-top:40px'>Libro</h1>",
+        unsafe_allow_html=True,
+    )
+    _, mid, _ = st.columns([1, 2, 1])
+    with mid:
+        if not is_password_set():
+            st.markdown("**Set a password** to secure Libro.")
+            with st.form("setup_pw"):
+                pw = st.text_input("Password", type="password")
+                pw2 = st.text_input("Confirm", type="password")
+                if st.form_submit_button("Set password", type="primary", width="stretch"):
+                    if len(pw) >= 8 and pw == pw2:
+                        set_password(pw)
+                        st.session_state.authenticated = True
+                        st.rerun()
+                    else:
+                        st.error("Password must be 8+ characters and match.")
+        else:
+            with st.form("login"):
+                pw = st.text_input("Password", type="password")
+                if st.form_submit_button("Unlock", type="primary", width="stretch"):
+                    if verify_password(pw):
+                        st.session_state.authenticated = True
+                        st.rerun()
+                    else:
+                        import time
+                        time.sleep(1.5)  # slow down guessing
+                        st.error("Incorrect password.")
+    st.stop()
 all_books = store.all()
 tag_index = build_tag_index(all_books)
 active_tags = list(st.session_state.active_tags)
@@ -247,6 +283,8 @@ active_tags = list(st.session_state.active_tags)
 with st.sidebar:
     st.markdown("<h1 style='text-align: center; color: #00ff88; font-family: Syne;'>Libro</h1>", unsafe_allow_html=True)
     
+    st.button("Lock", key="lock_app", width="stretch",
+              on_click=lambda: st.session_state.pop("authenticated", None))
     # Provider selector
     provider_options = ["OpenCode (primary)", "Xavier LAN (fallback)", "Ollama (local)"]
     provider = st.selectbox("Provider", provider_options, index=0)
@@ -272,25 +310,42 @@ with st.sidebar:
     if st.button("SCAN", type="primary", use_container_width=True):
         if user_input.strip():
             with st.spinner("Scanning..."):
+                stage, source_type = "detect", None
                 try:
                     # Detect source type
                     source_type = detect_source_type(user_input)
                     
                     # Fetch content if URL
+                    stage = "fetch"
                     if source_type == "url":
-                        raw_content = fetch_url(user_input)
+                        #raw_content = fetch_url(user_input)
+                        raw_content = fetch_instagram(user_input) if is_instagram_url(user_input) else fetch_url(user_input)
                     else:
                         raw_content = user_input
                     
                     # Clean text
+                    stage = "clean"
                     cleaned_content = clean_text(raw_content)
                     
                     # Extract book metadata (returns a list)
+                    stage = "extract"
                     book_list = extract_book(cleaned_content, source_type)
+                    if not book_list:
+                        log_scan(user_input=user_input, source_type=source_type,
+                                 stage="extract", status="empty")
+                        st.warning("No books found in that content.")
+                        st.stop()
                     
                     # Process each book
+                    stage = "store"
                     any_added = False
                     for book_data in book_list:
+                        # Skip items the model isn't confident are real books
+                        try:
+                            if float(book_data.get("confidence") or 0) < 0.5:
+                                continue
+                        except (TypeError, ValueError):
+                            continue
                         book_data["source_type"] = source_type
                         book_data.setdefault("book_type", "")
                         book_data.setdefault("source_url", "")
@@ -318,6 +373,8 @@ with st.sidebar:
                         if added:
                             any_added = True
                     
+                    log_scan(user_input=user_input, source_type=source_type, stage="done",
+                             status="ok", books=[b.get("title") for b in book_list])
                     if any_added:
                         st.success("Book(s) added to your want-to-read list!")
                     else:
@@ -327,7 +384,9 @@ with st.sidebar:
                 except Exception as e:
                     import traceback
                     error_type = type(e).__name__
-                    st.error(f"**Scan failed:** {error_type}")
+                    log_scan(user_input=user_input, source_type=source_type,
+                             stage=stage, status="error", error=e)
+                    st.error(f"**Scan failed:** {error_type}: {e}")
                     with st.expander("Error details"):
                         st.code(traceback.format_exc(), language="python")
                     with st.expander("Troubleshooting"):
@@ -405,6 +464,13 @@ with st.sidebar:
                     )
 
     # Stats
+    errs = recent(10, "error")
+    if errs:
+        with st.expander(f"Recent scan errors ({len(errs)})"):
+            for r in errs:
+                st.markdown(f"**{r['ts']}** · `{r['stage']}` · {r.get('error_type', '')}")
+                st.caption(r["input"][:120])
+                st.code(r.get("error", ""), language=None)
 
 # Main feed
 st.markdown("### Your Want-to-Read List")
