@@ -39,6 +39,13 @@ Important rules:
 - Genre tags should be lowercase and use hyphens for multi-word genres (e.g., "sci-fi", "historical-fiction").
 - The summary should be concise and spoiler-free.
 - The verdict should be a short phrase expressing your opinion.
+- Only extract books (novels, nonfiction, comics, graphic novels). Do not extract TV shows, films, games, music, songs, or podcasts, even if they are discussed.
+- Social media captions often credit the background audio with lines like "Earbuds:", "Audio:", "Song:", or "Music:". These are not books; skip them.
+- Only extract an item if the text presents it as a book. Do not infer that an unfamiliar title is a book.
+- An @handle is not an author name. Use the author's real name if the text gives one or you are confident of it; otherwise leave author empty.
+- If you do not recognize a book, keep the summary to what the text says about it and set confidence below 0.5. Never invent plot details.
+- Posts often discuss a show, film, or game and then recommend related books. Extract the recommended books; skip the show, film, or game itself.
+- Items under a heading like "Book List", "Books", "Recs", or "TBR" are books.
 """
 
 # Set up Ollama client
@@ -157,7 +164,7 @@ def _parse_json_result(content: str) -> list[dict]:
     Returns a list of book dictionaries.
     """
     import sys
-    print(f"DEBUG _parse_json: input={repr(content[:300])}", file=sys.stderr)
+    pass  # debug print removed
     if not content or not content.strip():
         return []
     
