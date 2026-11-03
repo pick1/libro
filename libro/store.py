@@ -49,6 +49,9 @@ class WantToReadStore:
             "source_url": book.get("source_url") or "",
             "reading_status": book.get("reading_status", "want_to_read"),
         }
+        # Optional SDPL availability fields (scalars only; Chroma rejects None)
+        metadata.update({k: v for k, v in book.items()
+                         if k.startswith("sdpl_") and isinstance(v, (str, int, float, bool))})
         # Generate ID from title and author
         import hashlib
         id_string = f"{book['title']}{book.get('author') or ''}"
@@ -109,6 +112,7 @@ class WantToReadStore:
                 "is_read": bool(metadata.get("is_read", False)),
                 "is_loved": bool(metadata.get("is_loved", False)),
             }
+            book.update({k: v for k, v in metadata.items() if k.startswith("sdpl_")})
             books.append(book)
         return books
 
@@ -140,6 +144,7 @@ class WantToReadStore:
                 "is_read": bool(metadata.get("is_read", False)),
                 "is_loved": bool(metadata.get("is_loved", False)),
             }
+            book.update({k: v for k, v in metadata.items() if k.startswith("sdpl_")})
             books.append(book)
         return books
     def toggle_read(self, book_id: str, current: bool) -> None:
@@ -149,3 +154,9 @@ class WantToReadStore:
     def toggle_loved(self, book_id: str, current: bool) -> None:
         """Toggle loved status."""
         self.collection.update(ids=[book_id], metadatas=[{"is_loved": not current}])
+
+    def update_fields(self, book_id: str, fields: dict) -> None:
+        """Merge scalar metadata fields into an existing entry (Chroma merges on update)."""
+        clean = {k: v for k, v in fields.items() if isinstance(v, (str, int, float, bool))}
+        if clean:
+            self.collection.update(ids=[book_id], metadatas=[clean])
