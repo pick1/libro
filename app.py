@@ -10,6 +10,9 @@ import streamlit as st
 from libro.extractor import detect_source_type, fetch_url, clean_text
 from libro.analyzer import extract_book, set_notification_callback
 from libro.scanlog import log_scan, recent
+import time as _time
+from libro.sdpl import check_sdpl, as_fields, search_page_url, home_branch
+import html as _html
 from libro.auth import is_password_set, verify_password, set_password
 from libro.librarian import LibrarianIndex
 from libro.store import WantToReadStore
@@ -36,6 +39,27 @@ def toggle_tag(tag: str) -> None:
     st.session_state.active_tags = active
 
 
+def _ago(ts) -> str:
+    if not ts:
+        return ""
+    s = int(_time.time() - float(ts))
+    if s < 60:
+        return "just now"
+    if s < 3600:
+        return f"{s // 60}m ago"
+    if s < 86400:
+        return f"{s // 3600}h ago"
+    return f"{s // 86400}d ago"
+
+
+def refresh_sdpl(bid: str, title: str, author) -> None:
+    """Re-check one book's SDPL availability (button callback)."""
+    try:
+        store.update_fields(bid, as_fields(check_sdpl(title, author)))
+        st.toast(f"SDPL refreshed: {title}")
+    except Exception as e:
+        log_scan(user_input=title, source_type="refresh", stage="sdpl", status="error", error=e)
+        st.toast(f"SDPL lookup failed: {type(e).__name__}", icon="⚠️")
 def clear_filters() -> None:
     st.session_state.active_tags = []
     st.session_state.search_query = ""
@@ -367,6 +391,11 @@ with st.sidebar:
                         )
                         book_data["available_in_cloud_library"] = available
                         book_data["cloud_library_match"] = matched_title
+                        try:
+                            book_data.update(as_fields(check_sdpl(book_data["title"], book_data.get("author"))))
+                        except Exception as e:
+                            log_scan(user_input=user_input, source_type=source_type,
+                                     stage="sdpl", status="error", error=e)
                         
                         # Add to store
                         added = store.add(book_data)
@@ -534,6 +563,36 @@ else:
                 st.markdown(" ".join(pills), unsafe_allow_html=True)
                 if book["author"]:
                     st.markdown(f"<p class='author'>by {book['author']}</p>", unsafe_allow_html=True)
+                bid_s = book_id(book)
+                home = home_branch() or "your branch"
+                checked = _ago(book.get("sdpl_checked_at"))
+                rec_url = book.get("sdpl_url") or search_page_url(book.get("title", ""), book.get("author"))
+                if not book.get("sdpl_checked_at"):
+                    sdpl_color, sdpl_line, link_label = "#606080", "SDPL: not checked yet", "Search ↗"
+                elif book.get("sdpl_at_home"):
+                    sdpl_color, sdpl_line, link_label = "#00ff88", f"★ On shelf at {home}", "Open record ↗"
+                    if book.get("sdpl_call_number"):
+                        sdpl_line += f" · {book['sdpl_call_number']}"
+                elif book.get("sdpl_available"):
+                    sdpl_color, sdpl_line, link_label = "#44aaff", book.get("sdpl_summary", ""), f"Request to {home} ↗"
+                elif book.get("sdpl_found") and book.get("sdpl_physical"):
+                    sdpl_color, sdpl_line, link_label = "#ffaa00", book.get("sdpl_summary", ""), "Place hold ↗"
+                elif book.get("sdpl_found"):
+                    sdpl_color, sdpl_line, link_label = "#9090b0", book.get("sdpl_summary", ""), "Open record ↗"
+                else:
+                    sdpl_color, sdpl_line, link_label = "#606080", "Not in SDPL catalog", "Search / suggest ↗"
+                c_sdpl, c_ref = st.columns([6, 1])
+                with c_sdpl:
+                    st.markdown(
+                        f"<span style='color:{sdpl_color};font-size:12px'>{_html.escape(sdpl_line)}</span> "
+                        f"<a href='{_html.escape(rec_url, quote=True)}' target='_blank' "
+                        f"style='color:#44aaff;font-size:12px;text-decoration:none'>{_html.escape(link_label)}</a>"
+                        + (f"<span style='color:#404060;font-size:11px'> · checked {checked}</span>" if checked else ""),
+                        unsafe_allow_html=True,
+                    )
+                with c_ref:
+                    st.button("↻", key=f"sdpl_refresh_{bid_s}", help="Re-check SDPL availability",
+                              on_click=refresh_sdpl, args=(bid_s, book.get("title", ""), book.get("author")))
                 tags = book_tags(book)
                 if tags:
                     # Element keys must be unique across the whole page, so the
