@@ -8,3 +8,6 @@ __pycache__/
 *.deb
 app.py.backup*
 data/
+*.bak
+*.bak[0-9]
+*.bak-*
