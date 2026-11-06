@@ -12,6 +12,7 @@ from libro.analyzer import extract_book, set_notification_callback
 from libro.scanlog import log_scan, recent
 import time as _time
 from libro.sdpl import check_sdpl, as_fields, search_page_url, home_branch
+from libro import sdpl_history
 import html as _html
 from libro.auth import is_password_set, verify_password, set_password
 from libro.librarian import LibrarianIndex
@@ -55,7 +56,9 @@ def _ago(ts) -> str:
 def refresh_sdpl(bid: str, title: str, author) -> None:
     """Re-check one book's SDPL availability (button callback)."""
     try:
-        store.update_fields(bid, as_fields(check_sdpl(title, author)))
+        fields = as_fields(check_sdpl(title, author))
+        store.update_fields(bid, fields)
+        sdpl_history.append(bid, title, fields, source="refresh")
         st.toast(f"SDPL refreshed: {title}")
     except Exception as e:
         log_scan(user_input=title, source_type="refresh", stage="sdpl", status="error", error=e)
@@ -392,7 +395,9 @@ with st.sidebar:
                         book_data["available_in_cloud_library"] = available
                         book_data["cloud_library_match"] = matched_title
                         try:
-                            book_data.update(as_fields(check_sdpl(book_data["title"], book_data.get("author"))))
+                            _sd = as_fields(check_sdpl(book_data["title"], book_data.get("author")))
+                            book_data.update(_sd)
+                            sdpl_history.append(book_id(book_data), book_data["title"], _sd, source="scan")
                         except Exception as e:
                             log_scan(user_input=user_input, source_type=source_type,
                                      stage="sdpl", status="error", error=e)
@@ -505,6 +510,35 @@ with st.sidebar:
 st.markdown("### Your Want-to-Read List")
 
 search_query = st.session_state.get("search_query", "")
+# ─── SDPL: what changed + trends ─────────────────────────────────────────
+_recent_changes = sdpl_history.changes(_time.time() - 7 * 86400)
+_good = [c for c in _recent_changes if c["good"]]
+if _recent_changes:
+    with st.expander(f"SDPL changes this week · {len(_good)} good news", expanded=bool(_good)):
+        for c in _recent_changes[:20]:
+            color = "#00ff88" if c["good"] else "#9090b0"
+            st.markdown(
+                f"<span style='color:{color};font-size:13px'>{_html.escape(c['title'])} — "
+                f"{_html.escape(c['label'])}</span> "
+                f"<span style='color:#404060;font-size:11px'>· {_ago(c['ts'])}</span>",
+                unsafe_allow_html=True,
+            )
+_hist_all = sdpl_history.load()
+if _hist_all:
+    with st.expander("SDPL availability trends"):
+        _pick = st.selectbox("Book", sorted({r["title"] for r in _hist_all}), key="trend_book")
+        _rows = [r for r in _hist_all if r["title"] == _pick]
+        if len(_rows) < 2:
+            st.caption("One check so far. The trend fills in as the daily refresh runs.")
+        else:
+            import pandas as _pd
+            _df = _pd.DataFrame({
+                "checked": [_pd.to_datetime(r["ts"], unit="s") for r in _rows],
+                "branches with a copy on the shelf": [r["on_shelf_count"] for r in _rows],
+            }).set_index("checked")
+            st.line_chart(_df)
+            _home = sum(1 for r in _rows if r["at_home"])
+            st.caption(f"{len(_rows)} checks · on the shelf at {home_branch() or 'your branch'} in {_home} of them")
 filtered_books = filter_books(all_books, active_tags, search_query)
 
 # Say what the feed is doing, so the result count never looks arbitrary.

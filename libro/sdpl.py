@@ -107,9 +107,15 @@ def _query_surname(author) -> str:
 def _search(text: str, timeout: int) -> list:
     body = {"searchText": text, "sorting": "relevance", "sortOrder": "asc",
             "searchType": "everything", "pageNum": 0, "pageSize": 10, "resourceType": "FormatGroup"}
-    r = requests.post(SEARCH_API, json=body, headers=_HEADERS, timeout=timeout)
-    r.raise_for_status()
-    return r.json().get("data") or []
+    for attempt in (1, 2):
+        try:
+            r = requests.post(SEARCH_API, json=body, headers=_HEADERS, timeout=timeout)
+            r.raise_for_status()
+            return r.json().get("data") or []
+        except (requests.Timeout, requests.ConnectionError):
+            if attempt == 2:
+                raise
+            time.sleep(5)  # one polite retry for transient timeouts
 
 
 def check_sdpl(title, author=None, timeout=15) -> dict:

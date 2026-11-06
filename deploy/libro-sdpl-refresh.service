@@ -1,0 +1,9 @@
+[Unit]
+Description=Libro: refresh SDPL availability for every book
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/dp/projects/libro
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/dp/projects/libro/venv/bin/python scripts/backfill_sdpl.py --all --source timer
+Nice=10
