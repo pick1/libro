@@ -7,6 +7,7 @@ crawl; keep this to one lookup per scanned/refreshed book, never bulk polling.
 import os
 import re
 import time
+from difflib import SequenceMatcher
 from urllib.parse import quote
 
 import requests
@@ -33,6 +34,7 @@ _HEADERS = {
     "Referer": "https://" + CUSTOMER + "/",
 }
 _SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "phd"}
+_PARTICLES = {"le", "la", "de", "du", "da", "di", "del", "della", "van", "von", "der", "den", "ter", "st"}
 
 
 def home_branch() -> str:
@@ -51,17 +53,24 @@ def _surname(name):
     name = (name or "").strip()
     if not name:
         return ""
+    if re.fullmatch(r"@?[A-Za-z0-9_.]+", name) and ("_" in name or name.startswith("@") or name.islower()):
+        return ""  # social handle (e.g. cj_north_writes), not an author name
     if "," in name:
         part = name.split(",")[0]
     else:
         words = [w for w in re.sub(r"[^\w\s]", " ", name).split() if w.lower() not in _SUFFIXES]
-        part = words[-1] if words else ""
+        if not words:
+            return ""
+        i = len(words) - 1
+        while i > 0 and words[i - 1].lower() in _PARTICLES:  # "Le Guin", "van der Meer"
+            i -= 1
+        part = "".join(words[i:])
     return re.sub(r"[^\w]", "", part.lower())
 
 
 # "Snow Crash" vs catalog "Snow Crash A Novel": allow a prefix match only when the
 # leftover is filler, so "Dune" never matches "Dune Messiah".
-_FILLER = re.compile(r"^(a |an )?(novel|novella|memoir|thriller|mystery|romance|story|stories)\b")
+_FILLER = re.compile(r"^(or |(a |an )?(novel|novella|memoir|thriller|mystery|romance|story|stories)\b)")
 
 
 def _title_score(want: str, got: str) -> int:
@@ -69,8 +78,12 @@ def _title_score(want: str, got: str) -> int:
     if want == got:
         return 2
     for short, long_ in ((want, got), (got, want)):
-        if long_.startswith(short + " ") and _FILLER.match(long_[len(short) + 1:]):
-            return 1
+        if long_.startswith(short + " "):
+            # filler/alt-title = 1; any other longer title = 0.5, needs the author to confirm
+            return 1 if _FILLER.match(long_[len(short) + 1:]) else 0.5
+    # spelling variants ("Marvelous" vs "Marvellous"): needs the author to confirm
+    if len(want) >= 6 and SequenceMatcher(None, want, got).ratio() >= 0.92:
+        return 0.75
     return 0
 
 
@@ -82,31 +95,49 @@ def search_page_url(title, author=None) -> str:
     return SEARCH_PAGE.format(q=quote(f"{title} {author or ''}".strip()))
 
 
+def _query_surname(author) -> str:
+    """Author's real last word for the search text ("Le Guin" -> "Guin"), unlike the joined match key."""
+    a = author or ""
+    if "," in a:
+        a = a.split(",")[0]
+    words = [w for w in re.sub(r"[^\w\s]", " ", a).split() if w.lower() not in _SUFFIXES]
+    return words[-1] if words else ""
+
+
+def _search(text: str, timeout: int) -> list:
+    body = {"searchText": text, "sorting": "relevance", "sortOrder": "asc",
+            "searchType": "everything", "pageNum": 0, "pageSize": 10, "resourceType": "FormatGroup"}
+    r = requests.post(SEARCH_API, json=body, headers=_HEADERS, timeout=timeout)
+    r.raise_for_status()
+    return r.json().get("data") or []
+
+
 def check_sdpl(title, author=None, timeout=15) -> dict:
     """Look up one book. Raises requests exceptions on HTTP failure."""
     want_title = _norm_title(title)
     if not want_title:
         return {"found": False, "url": search_page_url(title, author), "checked_at": int(time.time())}
     want_author = _surname(author)
-    body = {"searchText": f"{title} {want_author}".strip(), "sorting": "relevance",
-            "sortOrder": "asc", "searchType": "everything", "pageNum": 0,
-            "pageSize": 5, "resourceType": "FormatGroup"}
-    r = requests.post(SEARCH_API, json=body, headers=_HEADERS, timeout=timeout)
-    r.raise_for_status()
-    best, best_score = None, 0
-    for fg in r.json().get("data") or []:
+    word = _query_surname(author) if want_author else ""
+    results = _search(f"{title} {word}".strip(), timeout)
+    if not any(_title_score(want_title, _norm_title(fg.get("title"))) for fg in results):
+        results = _search(title, timeout)  # one retry on the title alone
+    candidates = []
+    for fg in results:
         score = _title_score(want_title, _norm_title(fg.get("title")))
         if not score:
             continue
         got_author = _surname((fg.get("primaryAgent") or {}).get("label"))
         if want_author and got_author and want_author != got_author:
             continue
-        if score > best_score:
-            best, best_score = fg, score
-            if score == 2:
-                break
-    if best:
-        return _summarize(best)
+        if score < 1 and not (want_author and want_author == got_author):
+            continue  # loose prefix match only when the author confirms it
+        has_book = any(t.get("type") == "physical" and t.get("name") == "Book"
+                       for t in fg.get("materialTabs") or [])
+        candidates.append((score >= 1, has_book, score, fg))
+    if candidates:
+        # strong title match first, then a physical Book over CDs/audio, then exactness
+        return _summarize(max(candidates, key=lambda c: c[:3])[3])
     return {"found": False, "url": search_page_url(title, author), "checked_at": int(time.time())}
 
 
